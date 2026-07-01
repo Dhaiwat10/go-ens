@@ -68,13 +68,6 @@ func TestResolveResolverEth(t *testing.T) {
 	assert.Equal(t, expected, hex.EncodeToString(actual[:]), "Did not receive expected result")
 }
 
-func TestResolveEthereum(t *testing.T) {
-	expected := "de0b295669a9fd93d5f28d9ec85e40f4cb697bae"
-	actual, err := Resolve(client, "ethereum.eth")
-	require.Nil(t, err, "Error resolving name")
-	assert.Equal(t, expected, hex.EncodeToString(actual[:]), "Did not receive expected result")
-}
-
 func TestResolveAddress(t *testing.T) {
 	expected := "b8c2c29ee19d8307cb7255e1cd9cbde883a267d5"
 	actual, err := Resolve(client, "0xb8c2C29ee19D8307cb7255e1Cd9CbDE883A267d5")

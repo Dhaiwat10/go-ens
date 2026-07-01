@@ -17,6 +17,7 @@ package ens
 import (
 	"bytes"
 	"compress/zlib"
+	"context"
 	"errors"
 	"io"
 	"math/big"
@@ -27,8 +28,6 @@ import (
 	"github.com/ethereum/go-ethereum/core/types"
 	"github.com/wealdtech/go-ens/v3/contracts/resolver"
 )
-
-var zeroHash = make([]byte, 32)
 
 // UnknownAddress is the address to which unknown entries resolve.
 var UnknownAddress = common.HexToAddress("00")
@@ -97,6 +96,12 @@ func PublicResolverAddress(backend bind.ContractBackend) (common.Address, error)
 }
 
 // Address returns the Ethereum address of the domain.
+//
+// Note: this calls the resolver contract directly via the legacy registry
+// walk, so it does NOT support ENSIP-10 wildcard resolution or ERC-3668
+// CCIP-Read. Names whose addresses live off-chain or on an L2 will return
+// the zero address or an error here. For wildcard- and CCIP-Read-aware
+// resolution, use ens.Resolve / UniversalResolver.ResolveAddress instead.
 func (r *Resolver) Address() (common.Address, error) {
 	nameHash, err := NameHash(r.domain)
 	if err != nil {
@@ -180,11 +185,29 @@ func (r *Resolver) InterfaceImplementer(interfaceID [4]byte) (common.Address, er
 	return r.Contract.InterfaceImplementer(nil, nameHash, interfaceID)
 }
 
-// Resolve resolves an ENS name in to an Etheruem address.
-// This will return an error if the name is not found or otherwise 0.
+// Resolve resolves an ENS name in to an Ethereum address. Resolution flows
+// through the ENS UniversalResolver, which means CCIP-Read (ERC-3668) is
+// followed transparently — names backed by offchain or L2 data resolve the
+// same way as fully on-chain names. An input that contains no dot is treated
+// as a literal hex address.
+//
+// This will return an error if the name is not found or otherwise resolves
+// to the zero address.
+//
+// Resolve uses a background context, so callers cannot cancel a slow
+// CCIP-Read hop or propagate an HTTP-handler deadline. Use ResolveContext
+// when either is needed.
 func Resolve(backend bind.ContractBackend, input string) (common.Address, error) {
+	return ResolveContext(context.Background(), backend, input)
+}
+
+// ResolveContext is identical to Resolve but honours ctx for cancellation
+// and deadline propagation. The context flows through CCIP-Read hops, so a
+// caller that sets a per-request deadline can cap the total resolution
+// time end-to-end.
+func ResolveContext(ctx context.Context, backend bind.ContractBackend, input string) (common.Address, error) {
 	if strings.Contains(input, ".") {
-		return resolveName(backend, input)
+		return resolveName(ctx, backend, input)
 	}
 	if (strings.HasPrefix(input, "0x") && len(input) > 42) || (!strings.HasPrefix(input, "0x") && len(input) > 40) {
 		return UnknownAddress, errors.New("address too long")
@@ -197,38 +220,15 @@ func Resolve(backend bind.ContractBackend, input string) (common.Address, error)
 	return address, nil
 }
 
-func resolveName(backend bind.ContractBackend, input string) (common.Address, error) {
-	nameHash, err := NameHash(input)
+func resolveName(ctx context.Context, backend bind.ContractBackend, input string) (common.Address, error) {
+	if _, err := NameHash(input); err != nil {
+		return UnknownAddress, err
+	}
+	ur, err := NewUniversalResolverContext(ctx, backend)
 	if err != nil {
 		return UnknownAddress, err
 	}
-	if bytes.Equal(nameHash[:], zeroHash) {
-		return UnknownAddress, errors.New("bad name")
-	}
-	address, err := resolveHash(backend, input)
-	if err != nil {
-		return UnknownAddress, err
-	}
-
-	return address, nil
-}
-
-func resolveHash(backend bind.ContractBackend, domain string) (common.Address, error) {
-	resolver, err := NewResolver(backend, domain)
-	if err != nil {
-		return UnknownAddress, err
-	}
-
-	// Resolve the domain.
-	address, err := resolver.Address()
-	if err != nil {
-		return UnknownAddress, err
-	}
-	if bytes.Equal(address.Bytes(), UnknownAddress.Bytes()) {
-		return UnknownAddress, errors.New("no address")
-	}
-
-	return address, nil
+	return ur.ResolveAddress(ctx, input)
 }
 
 // SetText sets the text associated with a name.
